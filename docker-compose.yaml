@@ -175,6 +175,9 @@ services:
       - "traefik.http.routers.play.priority=1"
       - "traefik.http.routers.play.service=play"
       - "traefik.http.services.play.loadbalancer.server.port=3000"
+      - "traefik.http.middlewares.play-iframe-headers.headers.customresponseheaders.X-Frame-Options=ALLOW-FROM http://localhost:4200"
+      - "traefik.http.middlewares.play-iframe-headers.headers.customresponseheaders.Content-Security-Policy=frame-ancestors 'self' http://localhost:4200"
+      - "traefik.http.routers.play.middlewares=play-iframe-headers@docker"
 
       - "traefik.http.routers.play-ws.rule=HostRegexp(`{domain:.*}`) && PathPrefix(`/ws/`)"
       - "traefik.http.routers.play-ws.priority=2"
