@@ -17,6 +17,9 @@ import {
     SetPlayerDetailsMessage,
     SubToPusherRoomMessage,
     VariableWithTagMessage,
+    CharacterTextureMessage,
+    CompanionTextureMessage,
+    AvailabilityStatus,
 } from "@workadventure/messages";
 import { Jitsi } from "@workadventure/shared-utils";
 import { ITiledMap, ITiledMapProperty, Json } from "@workadventure/tiled-map-type-guard";
@@ -59,9 +62,41 @@ import { Group } from "./Group";
 import { PositionNotifier } from "./PositionNotifier";
 import { User, UserSocket } from "./User";
 import { PointInterface } from "./Websocket/PointInterface";
+import {
+    AgentRegistrationPayload as ImportedAgentRegistrationPayload,
+    AgentInfo as ImportedAgentInfo,
+    validateAgentRegistrationPayload,
+    validateAgentMovementPayload,
+    validateAgentRemovalPayload,
+    generateAgentId,
+} from "./Agent";
 
 export type ConnectCallback = (user: User, group: Group) => void;
 export type DisconnectCallback = (user: User, group: Group) => void;
+
+// Agent registration interfaces
+interface AgentRegistrationPayload {
+    agentId?: string;
+    name: string;
+    avatar?: {
+        textures: string[];
+        companion?: string;
+    };
+    position?: {
+        x: number;
+        y: number;
+    };
+    tags?: string[];
+    variables?: Record<string, unknown>;
+}
+
+interface AgentInfo {
+    id: number;
+    agentId: string;
+    name: string;
+    user: User;
+    isFirstTime: boolean;
+}
 
 export class GameRoom implements BrothersFinder {
     public readonly id: string;
@@ -70,6 +105,10 @@ export class GameRoom implements BrothersFinder {
     private readonly usersByUuid = new Map<string, Set<User>>();
     private readonly groups: Map<number, Group> = new Map<number, Group>();
     private readonly admins = new Set<Admin>();
+
+    // Agent management
+    private readonly agents = new Map<string, AgentInfo>();
+    private agentIdCounter = 100000; // Start agent IDs from a high number to avoid conflicts
 
     private itemsState = new Map<number, unknown>();
 
@@ -550,6 +589,11 @@ export class GameRoom implements BrothersFinder {
 
     public getItemsState(): Map<number, unknown> {
         return this.itemsState;
+    }
+
+    public async listVariables(): Promise<string[]> {
+        const variableManager = await this.getVariableManager();
+        return variableManager.listVariables();
     }
 
     public async setVariable(name: string, value: string, user: User | "RoomApi"): Promise<void> {
@@ -1168,6 +1212,21 @@ export class GameRoom implements BrothersFinder {
     }
 
     public dispatchEvent(name: string, data: unknown, senderId: number | "RoomApi", targetUserIds: number[]): void {
+        // Special handling for agent events
+        if (senderId === "RoomApi") {
+            switch (name) {
+                case "register-agent":
+                    this.handleAgentRegistration(data);
+                    return;
+                case "move-agent":
+                    this.handleAgentMovement(data);
+                    return;
+                case "remove-agent":
+                    this.handleAgentRemoval(data);
+                    return;
+            }
+        }
+
         if (targetUserIds.length === 0) {
             // Dispatch to all users
             this.sendSubMessageToRoom({
@@ -1226,5 +1285,367 @@ export class GameRoom implements BrothersFinder {
 
     get wamSettings(): WAMFileFormat["settings"] {
         return this._wamSettings;
+    }
+
+    /**
+     * Handles agent registration from Room API
+     */
+    private async handleAgentRegistration(data: unknown): Promise<void> {
+        try {
+            console.log("handleAgentRegistration received data:", data);
+            console.log("Data type:", typeof data);
+            console.log("Data stringified:", JSON.stringify(data));
+            const payload = this.validateAgentRegistrationPayload(data);
+            const agentInfo = await this.registerAgent(payload);
+            
+            // Broadcast appropriate event based on whether this is first-time registration or login
+            const eventName = agentInfo.isFirstTime ? "new-agent" : "agent-login";
+            const eventData = {
+                playerId: agentInfo.id,
+                agentId: agentInfo.agentId,
+                name: agentInfo.name,
+                position: agentInfo.user.getPosition(),
+                uuid: agentInfo.user.uuid,
+                availabilityStatus: agentInfo.user.getAvailabilityStatus(),
+                variables: {},
+            };
+
+            this.sendSubMessageToRoom({
+                message: {
+                    $case: "receivedEventMessage",
+                    receivedEventMessage: {
+                        name: eventName,
+                        data: eventData,
+                        senderId: undefined,
+                    },
+                },
+            });
+
+        } catch (error) {
+            console.error("Error handling agent registration:", error);
+            // Broadcast error event
+            this.sendSubMessageToRoom({
+                message: {
+                    $case: "receivedEventMessage",
+                    receivedEventMessage: {
+                        name: "agent-registration-error",
+                        data: { error: error instanceof Error ? error.message : "Unknown error" },
+                        senderId: undefined,
+                    },
+                },
+            });
+        }
+    }
+
+    /**
+     * Validates the agent registration payload
+     */
+    private validateAgentRegistrationPayload(data: unknown): AgentRegistrationPayload {
+        if (!data || typeof data !== "object") {
+            throw new Error("Invalid payload: must be an object");
+        }
+
+        const payload = data as Record<string, unknown>;
+
+        if (!payload.name || typeof payload.name !== "string") {
+            throw new Error("Invalid payload: name is required and must be a string");
+        }
+
+        // Validate optional fields
+        if (payload.agentId && typeof payload.agentId !== "string") {
+            throw new Error("Invalid payload: agentId must be a string");
+        }
+
+        if (payload.position && (typeof payload.position !== "object" || !payload.position)) {
+            throw new Error("Invalid payload: position must be an object");
+        }
+
+        if (payload.tags && !Array.isArray(payload.tags)) {
+            throw new Error("Invalid payload: tags must be an array");
+        }
+
+        return payload as unknown as AgentRegistrationPayload;
+    }
+
+    /**
+     * Registers an agent and creates a User for it
+     */
+    private async registerAgent(payload: AgentRegistrationPayload): Promise<AgentInfo> {
+        let agentId = payload.agentId;
+        let isFirstTime = false;
+
+        // If no agentId provided, this is a new agent
+        if (!agentId) {
+            agentId = this.generateAgentId();
+            isFirstTime = true;
+        }
+
+        // Check if agent already exists
+        const existingAgent = this.agents.get(agentId);
+        if (existingAgent) {
+            // Agent is logging back in
+            return { ...existingAgent, isFirstTime: false };
+        }
+
+        // Create new agent
+        isFirstTime = true;
+        const userId = this.agentIdCounter++;
+        
+        // Generate default position if not provided
+        const position = {
+            x: payload.position?.x || 100,
+            y: payload.position?.y || 100,
+            direction: "down",
+            moving: false,
+        };
+        
+        // Create character textures
+        const characterTextures: CharacterTextureMessage[] = payload.avatar?.textures?.map((texture, index) => ({
+            id: index.toString(),
+            layer: "body",
+            url: texture,
+        })) || [
+            {
+                id: "0",
+                layer: "body", 
+                url: "/resources/characters/pipoya/Male 01-1.png", // Default avatar
+            }
+        ];
+
+        // Create companion texture if provided
+        const companionTexture: CompanionTextureMessage | undefined = payload.avatar?.companion ? {
+            id: "0",
+            url: payload.avatar.companion,
+        } : undefined;
+
+        // Create a mock socket for the agent
+        const agentSocket = this.createMockAgentSocket();
+
+        // Create User for the agent
+        const agentUser = await User.create(
+            userId,
+            `agent-${agentId}`, // UUID for agent
+            false, // isLogged
+            "0.0.0.0", // IP address
+            position,
+            this.positionNotifier,
+            AvailabilityStatus.ONLINE,
+            agentSocket,
+            payload.tags || ["agent"],
+            false, // canEdit
+            null, // visitCardUrl
+            payload.name,
+            characterTextures,
+            this._roomUrl,
+            this._roomGroup ?? undefined,
+            this,
+            companionTexture,
+            undefined, // outlineColor
+            false, // voiceIndicatorShown
+            false, // activatedInviteUser
+            [], // applications
+            undefined, // chatID
+            undefined // sayMessage
+        );
+
+        // Set agent variables
+        if (payload.variables) {
+            for (const [key, value] of Object.entries(payload.variables)) {
+                try {
+                    await this.setVariable(key, JSON.stringify(value), agentUser);
+                } catch (error) {
+                    console.warn(`Failed to set variable ${key} for agent ${agentId}:`, error);
+                }
+            }
+        }
+
+        // Add to users and agent maps
+        this.users.set(userId, agentUser);
+        let uuidSet = this.usersByUuid.get(agentUser.uuid);
+        if (!uuidSet) {
+            uuidSet = new Set();
+            this.usersByUuid.set(agentUser.uuid, uuidSet);
+        }
+        uuidSet.add(agentUser);
+
+        const agentInfo: AgentInfo = {
+            id: userId,
+            agentId,
+            name: payload.name,
+            user: agentUser,
+            isFirstTime,
+        };
+
+        this.agents.set(agentId, agentInfo);
+
+        // Trigger position notifier for other users to see the agent
+        this.positionNotifier.enter(agentUser);
+
+        return agentInfo;
+    }
+
+    /**
+     * Generates a unique agent ID
+     */
+    private generateAgentId(): string {
+        return `agent_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    }
+
+    /**
+     * Creates a mock socket for agents since they don't have real WebSocket connections
+     */
+    private createMockAgentSocket(): any {
+        return {
+            write: () => {}, // Agents don't receive messages
+            on: () => {},
+            off: () => {},
+            end: () => {},
+            destroy: () => {},
+        };
+    }
+
+    /**
+     * Gets agent information by agent ID
+     */
+    public getAgent(agentId: string): AgentInfo | undefined {
+        return this.agents.get(agentId);
+    }
+
+    /**
+     * Gets all registered agents
+     */
+    public getAgents(): Map<string, AgentInfo> {
+        return this.agents;
+    }
+
+    /**
+     * Removes an agent from the room
+     */
+    public removeAgent(agentId: string): boolean {
+        const agentInfo = this.agents.get(agentId);
+        if (!agentInfo) {
+            return false;
+        }
+
+        // Remove from users
+        this.leave(agentInfo.user);
+        
+        // Remove from agents map
+        this.agents.delete(agentId);
+
+        // Broadcast agent departure
+        this.sendSubMessageToRoom({
+            message: {
+                $case: "receivedEventMessage",
+                receivedEventMessage: {
+                    name: "agent-logout",
+                    data: {
+                        agentId,
+                        playerId: agentInfo.id,
+                        name: agentInfo.name,
+                    },
+                    senderId: undefined,
+                },
+            },
+        });
+
+        return true;
+    }
+
+    /**
+     * Handles agent movement
+     */
+    private handleAgentMovement(data: unknown): void {
+        try {
+            if (!data || typeof data !== "object") {
+                throw new Error("Invalid payload: must be an object");
+            }
+
+            const payload = data as Record<string, unknown>;
+            const agentId = payload.agentId as string;
+            const x = payload.x as number;
+            const y = payload.y as number;
+
+            if (!agentId || typeof agentId !== "string") {
+                throw new Error("Invalid payload: agentId is required");
+            }
+
+            if (typeof x !== "number" || typeof y !== "number") {
+                throw new Error("Invalid payload: x and y coordinates are required");
+            }
+
+            const agentInfo = this.agents.get(agentId);
+            if (!agentInfo) {
+                throw new Error(`Agent ${agentId} not found`);
+            }
+
+            // Move the agent
+            this.updatePosition(agentInfo.user, { x, y, direction: "down", moving: false });
+
+            // Broadcast movement event
+            this.sendSubMessageToRoom({
+                message: {
+                    $case: "receivedEventMessage",
+                    receivedEventMessage: {
+                        name: "agent-moved",
+                        data: {
+                            agentId,
+                            playerId: agentInfo.id,
+                            position: { x, y },
+                        },
+                        senderId: undefined,
+                    },
+                },
+            });
+
+        } catch (error) {
+            console.error("Error handling agent movement:", error);
+            this.sendSubMessageToRoom({
+                message: {
+                    $case: "receivedEventMessage",
+                    receivedEventMessage: {
+                        name: "agent-movement-error",
+                        data: { error: error instanceof Error ? error.message : "Unknown error" },
+                        senderId: undefined,
+                    },
+                },
+            });
+        }
+    }
+
+    /**
+     * Handles agent removal
+     */
+    private handleAgentRemoval(data: unknown): void {
+        try {
+            if (!data || typeof data !== "object") {
+                throw new Error("Invalid payload: must be an object");
+            }
+
+            const payload = data as Record<string, unknown>;
+            const agentId = payload.agentId as string;
+
+            if (!agentId || typeof agentId !== "string") {
+                throw new Error("Invalid payload: agentId is required");
+            }
+
+            const success = this.removeAgent(agentId);
+            if (!success) {
+                throw new Error(`Agent ${agentId} not found`);
+            }
+
+        } catch (error) {
+            console.error("Error handling agent removal:", error);
+            this.sendSubMessageToRoom({
+                message: {
+                    $case: "receivedEventMessage",
+                    receivedEventMessage: {
+                        name: "agent-removal-error",
+                        data: { error: error instanceof Error ? error.message : "Unknown error" },
+                        senderId: undefined,
+                    },
+                },
+            });
+        }
     }
 }

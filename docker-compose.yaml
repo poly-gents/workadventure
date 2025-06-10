@@ -41,6 +41,7 @@ services:
       - .:/usr/src/app
     tmpfs: /tmp
     ports:
+      - "50051:50051"
       - "9231:9229"
       - "9235:9235"
     environment:

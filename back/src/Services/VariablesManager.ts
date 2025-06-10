@@ -183,9 +183,13 @@ export class VariablesManager {
         if (this.variableObjects) {
             variableObject = this.variableObjects.get(name);
             if (variableObject === undefined) {
-                throw new VariableError(
-                    'Trying to set a variable "' + name + '" that is not defined as an object in the map.'
-                );
+                variableObject = {
+                    defaultValue: value,
+                    persist: false,
+                    writableBy: "RoomApi",
+                    readableBy: "RoomApi",
+                };
+                this.variableObjects.set(name, variableObject);
             }
 
             if (variableObject.writableBy && user !== "RoomApi" && !user.tags.includes(variableObject.writableBy)) {
@@ -239,5 +243,9 @@ export class VariablesManager {
             }
         }
         return readableVariables;
+    }
+
+    public listVariables(): string[] {
+        return Array.from(this.variableObjects?.keys() || []);
     }
 }
