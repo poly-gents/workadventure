@@ -25,6 +25,7 @@ export interface AgentInfo {
     name: string;
     user: User;
     isFirstTime: boolean;
+    variables?: Record<string, unknown>;
 }
 
 export interface AgentMovementPayload {

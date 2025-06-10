@@ -73,3 +73,23 @@
 - **Backend Logic Complete**: The entire backend logic for registering, tracking, and removing agents is implemented in `GameRoom.ts`.
 - **UI Visibility**: Registered agents correctly appear as remote players in the WorkAdventure UI.
 - **Clear API**: A clear JSON payload structure has been defined for agent registration.
+
+## Phase 4: Centralized State Management
+- **Status**: ✅ Completed
+
+- [x] **Define State Structures**: Created `back/src/Model/State.ts` with interfaces for player and map object states.
+- [x] **Implement State in GameRoom**: Added `playersState` and `mapObjectsState` properties to `GameRoom.ts`.
+- [x] **Hook into Lifecycles**:
+    - **Sub-task**: `playersState` is now updated on player `join` and `leave`.
+    - **Sub-task**: `mapObjectsState` is initialized on room creation.
+- [x] **Expose State as Room Variables**:
+    - **Sub-task**: The `playersState` is saved to the `"players_state"` room variable on every update.
+    - **Sub-task**: The `mapObjectsState` is saved to the `"map_objects_state"` room variable on initialization.
+- [x] **Refactor for Type Safety**: Updated `Group.ts` with public getters and fixed usages in `SocketManager.ts` to resolve runtime errors.
+
+## What Works
+- **Dynamic Agent Creation**: Agents can now be created dynamically via a `room-api` event.
+- **Backend Logic Complete**: The entire backend logic for registering, tracking, and removing agents is implemented in `GameRoom.ts`.
+- **UI Visibility**: Registered agents correctly appear as remote players in the WorkAdventure UI.
+- **Clear API**: A clear JSON payload structure has been defined for agent registration.
+- **Centralized State**: Player and map object state is now tracked in `GameRoom` and exposed via room variables, providing a single source of truth.

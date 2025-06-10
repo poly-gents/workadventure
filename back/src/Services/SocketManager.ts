@@ -1,4 +1,6 @@
-import crypto from "crypto";
+import { ServiceError } from "@grpc/grpc-js";
+import * as Sentry from "@sentry/node";
+import { WAMSettingsUtils } from "@workadventure/map-editor";
 import {
     AddSpaceUserMessage,
     AnswerMessage,
@@ -10,6 +12,7 @@ import {
     EditMapCommandsArrayMessage,
     EmoteEventMessage,
     EmotePromptMessage,
+    ExternalModuleMessage,
     FollowAbortMessage,
     FollowConfirmationMessage,
     FollowRequestMessage,
@@ -21,9 +24,14 @@ import {
     JoinBBBMeetingAnswer,
     JoinBBBMeetingQuery,
     JoinRoomMessage,
+    JoinSpaceMessage,
     KickOffMessage,
+    LeaveSpaceMessage,
     LockGroupPromptMessage,
     PlayerDetailsUpdatedMessage,
+    PrivateEvent,
+    Zone as ProtoZone,
+    PublicEvent,
     QueryMessage,
     RemoveSpaceUserMessage,
     RoomDescription,
@@ -44,38 +52,30 @@ import {
     WebRtcSignalToClientMessage,
     WebRtcSignalToServerMessage,
     WebRtcStartMessage,
-    Zone as ProtoZone,
-    PublicEvent,
-    PrivateEvent,
-    LeaveSpaceMessage,
-    JoinSpaceMessage,
-    ExternalModuleMessage,
 } from "@workadventure/messages";
-import Jwt from "jsonwebtoken";
 import BigbluebuttonJs from "bigbluebutton-js";
-import Debug from "debug";
-import * as Sentry from "@sentry/node";
-import { WAMSettingsUtils } from "@workadventure/map-editor";
-import { z } from "zod";
-import { ServiceError } from "@grpc/grpc-js";
 import { asError } from "catch-unknown";
-import { GameRoom } from "../Model/GameRoom";
-import { User, UserSocket } from "../Model/User";
-import { ProtobufUtils } from "../Model/Websocket/ProtobufUtils";
-import { Group } from "../Model/Group";
+import crypto from "crypto";
+import Debug from "debug";
+import Jwt from "jsonwebtoken";
+import { z } from "zod";
 import { GROUP_RADIUS, MINIMUM_DISTANCE, TURN_STATIC_AUTH_SECRET } from "../Enum/EnvironmentVariable";
+import { Admin } from "../Model/Admin";
+import { GameRoom } from "../Model/GameRoom";
+import { Group } from "../Model/Group";
 import { Movable } from "../Model/Movable";
 import { PositionInterface } from "../Model/PositionInterface";
-import { EventSocket, RoomSocket, VariableSocket, ZoneSocket } from "../RoomManager";
-import { Zone } from "../Model/Zone";
-import { Admin } from "../Model/Admin";
 import { Space } from "../Model/Space";
 import { SpacesWatcher } from "../Model/SpacesWatcher";
-import { gaugeManager } from "./GaugeManager";
+import { User, UserSocket } from "../Model/User";
+import { ProtobufUtils } from "../Model/Websocket/ProtobufUtils";
+import { Zone } from "../Model/Zone";
+import { EventSocket, RoomSocket, VariableSocket, ZoneSocket } from "../RoomManager";
 import { clientEventsEmitter } from "./ClientEventsEmitter";
+import { cpuTracker } from "./CpuTracker";
+import { gaugeManager } from "./GaugeManager";
 import { getMapStorageClient } from "./MapStorageClient";
 import { emitError } from "./MessageHelpers";
-import { cpuTracker } from "./CpuTracker";
 
 const debug = Debug("socketmanager");
 
@@ -504,7 +504,7 @@ export class SocketManager {
         if (thing instanceof User) {
             this.emitUserLeftEvent(listener, thing.id, newZone);
         } else if (thing instanceof Group) {
-            this.emitDeleteGroupEvent(listener, thing.getId(), newZone);
+            this.emitDeleteGroupEvent(listener, thing.id, newZone);
         } else {
             console.error("Unexpected type for Movable.");
             Sentry.captureException("Unexpected type for Movable.");
@@ -551,16 +551,15 @@ export class SocketManager {
     }
 
     private emitCreateUpdateGroupEvent(client: ZoneSocket, fromZone: Zone | null, group: Group): void {
-        const position = group.getPosition();
         emitZoneMessage(
             {
                 message: {
                     $case: "groupUpdateZoneMessage",
                     groupUpdateZoneMessage: {
-                        groupId: group.getId(),
+                        groupId: group.id,
                         position: {
-                            x: Math.floor(position.x),
-                            y: Math.floor(position.y),
+                            x: Math.floor(group.getPosition().x),
+                            y: Math.floor(group.getPosition().y),
                         },
                         groupSize: group.getSize,
                         fromZone: SocketManager.toProtoZone(fromZone),
@@ -616,12 +615,12 @@ export class SocketManager {
         const clientMessage: ServerToClientMessage["message"] = {
             $case: "groupUsersUpdateMessage",
             groupUsersUpdateMessage: {
-                groupId: group.getId(),
-                userIds: group.getUsers().map((user) => user.id),
+                groupId: group.id,
+                userIds: group.members.map((user) => user.id),
             },
         };
 
-        group.getUsers().forEach((currentUser: User) => {
+        group.members.forEach((currentUser: User) => {
             currentUser.write(clientMessage);
         });
     }
@@ -636,7 +635,7 @@ export class SocketManager {
         });
 
         // TODO: remove code below when WebRTC is managed in spaces
-        for (const otherUser of group.getUsers()) {
+        for (const otherUser of group.members) {
             if (user === otherUser) {
                 continue;
             }
@@ -698,40 +697,13 @@ export class SocketManager {
 
     //disconnect user
     private disConnectedUser(user: User, group: Group) {
-        user.write({
-            $case: "leaveSpaceRequestMessage",
-            leaveSpaceRequestMessage: {
-                spaceName: group.spaceName,
-            },
-        });
+        if (!group) {
+            return;
+        }
 
-        // Most of the time, sending a disconnect event to one of the players is enough (the player will close the connection
-        // which will be shut for the other player).
-        // However! In the rare case where the WebRTC connection is not yet established, if we close the connection on one of the player,
-        // the other player will try connecting until a timeout happens (during this time, the connection icon will be displayed for nothing).
-        // So we also send the disconnect event to the other player.
-        for (const otherUser of group.getUsers()) {
-            if (user === otherUser) {
-                continue;
-            }
-
-            //if (!otherUser.socket.disconnecting) {
-            otherUser.write({
-                $case: "webRtcDisconnectMessage",
-                webRtcDisconnectMessage: {
-                    userId: user.id,
-                },
-            });
-            //}
-
-            //if (!user.socket.disconnecting) {
-            user.write({
-                $case: "webRtcDisconnectMessage",
-                webRtcDisconnectMessage: {
-                    userId: otherUser.id,
-                },
-            });
-            //}
+        // Remove user from the WebRTC room for the other members
+        if (group.members.length > 0) {
+            this.sendGroupUsersUpdateToGroupMembers(group);
         }
     }
 
@@ -995,7 +967,7 @@ export class SocketManager {
                 batchMessage.payload.push(subMessage);
             } else if (thing instanceof Group) {
                 const groupUpdateMessage: Partial<GroupUpdateZoneMessage> = {
-                    groupId: thing.getId(),
+                    groupId: thing.id,
                     position: ProtobufUtils.toPointMessage(thing.getPosition()),
                     locked: thing.isLocked(),
                 };
@@ -1301,7 +1273,7 @@ export class SocketManager {
             return;
         }
         group.lock(message.lock);
-        room.emitLockGroupEvent(user, group.getId());
+        room.emitLockGroupEvent(user, group.id);
     }
 
     handleUpdateMapToNewestMessage(room: GameRoom, user: User, message: UpdateMapToNewestWithKeyMessage) {
@@ -1565,7 +1537,7 @@ export class SocketManager {
         if (!user.tags.includes("admin")) {
             return;
         }
-        const usersKiked = group.getUsers().filter((user) => user.uuid === userKickedUuid);
+        const usersKiked = group.members.filter((user) => user.uuid === userKickedUuid);
         if (usersKiked.length === 0) return;
         for (const userKiked of usersKiked) {
             group.leave(userKiked);

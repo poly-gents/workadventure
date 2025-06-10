@@ -68,6 +68,12 @@ import {
 import { BrothersFinder } from "./BrothersFinder";
 import { Group } from "./Group";
 import { PositionNotifier } from "./PositionNotifier";
+import {
+    MapLayerState,
+    MapObjectState,
+    MapState,
+    PlayerStateInfo,
+} from "./State";
 import { User, UserSocket } from "./User";
 import { PointInterface } from "./Websocket/PointInterface";
 
@@ -85,6 +91,11 @@ export class GameRoom implements BrothersFinder {
     // Agent management
     private readonly agents = new Map<string, AgentInfo>();
     private agentIdCounter = 100000; // Start agent IDs from a high number to avoid conflicts
+
+    // New state management variables
+    private readonly playersState = new Map<number, PlayerStateInfo>();
+    private readonly mapObjectsState: MapState = { layers: new Map() };
+    private mapStateInitialized = false;
 
     private itemsState = new Map<number, unknown>();
 
@@ -180,11 +191,22 @@ export class GameRoom implements BrothersFinder {
             wamFile ? wamFile.settings : undefined
         );
 
+        // Initialize map state after creation
+        gameRoom.initializeMapObjectsState();
+
         return gameRoom;
     }
 
     public getUsers(): Map<number, User> {
         return this.users;
+    }
+
+    public getPlayersState(): Map<number, PlayerStateInfo> {
+        return this.playersState;
+    }
+
+    public getMapObjectsState(): MapState {
+        return this.mapObjectsState;
     }
 
     public dispatchRoomMessage(message: SubToPusherRoomMessage): void {
@@ -269,6 +291,10 @@ export class GameRoom implements BrothersFinder {
         set.add(user);
         this.updateUserGroup(user);
 
+        // Update players state
+        const agentInfo = this.getAgentInfoForUser(user);
+        this.updatePlayerState(user, user.group, agentInfo);
+
         // Notify admins
         for (const admin of this.admins) {
             admin.sendUserJoin(user.uuid, user.name, user.IPAddress);
@@ -277,7 +303,7 @@ export class GameRoom implements BrothersFinder {
         return user;
     }
 
-    public leave(user: User) {
+    public leave(user: User): void {
         if (user.disconnected === true) {
             console.warn("User ", user.id, "already disconnected!");
             return;
@@ -312,6 +338,10 @@ export class GameRoom implements BrothersFinder {
         if (user !== undefined) {
             this.positionNotifier.leave(user);
         }
+
+        // Update players state
+        this.playersState.delete(user.id);
+        this.savePlayersStateToVariable();
 
         // Notify admins
         for (const admin of this.admins) {
@@ -367,14 +397,14 @@ export class GameRoom implements BrothersFinder {
                 } else {
                     const closestUser: User = closestItem;
                     const group: Group = new Group(
-                        this._roomUrl,
+                        this.id,
                         [user, closestUser],
                         this.groupRadius,
                         this.connectCallback,
                         this.disconnectCallback,
                         this.positionNotifier
                     );
-                    this.groups.set(group.getId(), group);
+                    this.groups.set(group.id, group);
                 }
             }
         } else {
@@ -390,11 +420,11 @@ export class GameRoom implements BrothersFinder {
 
             if (user.hasFollowers() || user.following) {
                 followingMembers = user.hasFollowers()
-                    ? group.getUsers().filter((currentUser) => currentUser.following === user)
-                    : group.getUsers().filter((currentUser) => currentUser.following === user.following);
+                    ? group.members.filter((currentUser) => currentUser.following === user)
+                    : group.members.filter((currentUser) => currentUser.following === user.following);
 
                 // If all group members are part of the same follow group
-                if (group.getUsers().length - 1 === followingMembers.length) {
+                if (group.members.length - 1 === followingMembers.length) {
                     let isOutOfBounds = false;
 
                     // If a follower is far away from the leader, "outOfBounds" is set to true
@@ -436,9 +466,9 @@ export class GameRoom implements BrothersFinder {
             const userDistance = GameRoom.computeDistanceBetweenPositions(user.getPosition(), previewNewGroupPosition);
 
             if (hasKickOutSomeone && userDistance > this.groupRadius) {
-                if (user.hasFollowers() && group.getUsers().length === 3 && followingMembers.length === 1) {
+                if (user.hasFollowers() && group.members.length === 3 && followingMembers.length === 1) {
                     const other = group
-                        .getUsers()
+                        .members
                         .find((currentUser) => !currentUser.hasFollowers() && !currentUser.following);
                     if (other) {
                         this.leaveGroup(other);
@@ -451,14 +481,14 @@ export class GameRoom implements BrothersFinder {
 
                     // Re-create a group with the followers
                     const newGroup: Group = new Group(
-                        this._roomUrl,
+                        this.id,
                         [user, ...followingMembers],
                         this.groupRadius,
                         this.connectCallback,
                         this.disconnectCallback,
                         this.positionNotifier
                     );
-                    this.groups.set(newGroup.getId(), newGroup);
+                    this.groups.set(newGroup.id, newGroup);
                 } else {
                     this.leaveGroup(user);
                 }
@@ -469,11 +499,17 @@ export class GameRoom implements BrothersFinder {
         user.group?.searchForNearbyUsers();
     }
 
-    public sendToOthersInGroupIncludingUser(user: User, message: ServerToClientMessage): void {
-        user.group?.getUsers().forEach((currentUser: User) => {
+    public sendToOthersInGroup(user: User, message: ServerToClientMessage): void {
+        user.group?.members.forEach((currentUser) => {
             if (currentUser.id !== user.id) {
                 currentUser.socket.write(message);
             }
+        });
+    }
+
+    public sendToOthersInGroupIncludingUser(user: User, message: ServerToClientMessage): void {
+        user.group?.members.forEach((currentUser) => {
+            currentUser.socket.write(message);
         });
     }
 
@@ -491,10 +527,9 @@ export class GameRoom implements BrothersFinder {
         group.leave(user);
         if (group.isEmpty()) {
             group.destroy();
-            if (!this.groups.has(group.getId())) {
-                throw new Error(`Could not find group ${group.getId()} referenced by user ${user.id} in World.`);
+            if (!this.groups.has(group.id)) {
+                throw new Error(`Could not find group ${group.id} referenced by user ${user.id} in World.`);
             }
-            this.groups.delete(group.getId());
             //todo: is the group garbage collected?
         } else {
             group.updatePosition();
@@ -1216,7 +1251,7 @@ export class GameRoom implements BrothersFinder {
                 },
             });
 
-            // Dispatch to RoomApi listeners
+            // Dispatch to Room API listeners
             const listeners = this.eventListeners.get(name);
             for (const eventListener of listeners ?? []) {
                 eventListener.write({
@@ -1270,13 +1305,14 @@ export class GameRoom implements BrothersFinder {
      * @param data The data payload for the event. This must be a JSON-serializable object.
      */
     private broadcastEventToRoom(name: string, data: unknown): void {
-        // Dispatch to in-game clients (via SubToPusherRoomMessage)
+        const eventData = JSON.stringify({ name, data });
+        // Send to all connected regular users
         this.sendSubMessageToRoom({
             message: {
                 $case: "receivedEventMessage",
                 receivedEventMessage: {
                     name,
-                    data,
+                    data: eventData,
                     senderId: undefined, // Events from agents are from the "system"
                 },
             },
@@ -1287,7 +1323,7 @@ export class GameRoom implements BrothersFinder {
         for (const eventListener of listeners ?? []) {
             eventListener.write({
                 senderId: undefined,
-                data,
+                data: eventData,
             });
         }
     }
@@ -1298,31 +1334,24 @@ export class GameRoom implements BrothersFinder {
     private async handleAgentRegistration(data: unknown): Promise<void> {
         try {
             const payload = validateAgentRegistrationPayload(data);
+
             const agentInfo = await this.registerAgent(payload);
 
-            const variables = await this.getVariablesForTags(agentInfo.user.tags);
-            const variablesRecord: Record<string, unknown> = {};
-            variables.forEach((value, key) => {
-                try {
-                    variablesRecord[key] = JSON.parse(value);
-                } catch (e) {
-                    // Do nothing
-                }
-            });
+            // Important: update player state *after* agent is registered and has a user object
+            this.updatePlayerState(agentInfo.user, agentInfo.user.group, agentInfo);
 
-            // Broadcast appropriate event based on whether this is first-time registration or login
-            const eventName = agentInfo.isFirstTime ? AgentEventType.NEW_AGENT : AgentEventType.AGENT_LOGIN;
+            const eventType = agentInfo.isFirstTime ? AgentEventType.NEW_AGENT : AgentEventType.AGENT_LOGIN;
             const eventData: AgentEventData = {
-                playerId: agentInfo.id,
+                playerId: agentInfo.user.id,
                 agentId: agentInfo.agentId,
                 name: agentInfo.name,
                 position: agentInfo.user.getPosition(),
                 uuid: agentInfo.user.uuid,
                 availabilityStatus: agentInfo.user.getAvailabilityStatus(),
-                variables: variablesRecord,
+                variables: agentInfo.variables,
             };
 
-            this.broadcastEventToRoom(eventName, eventData);
+            this.broadcastEventToRoom(eventType, eventData);
         } catch (error) {
             console.error("Error handling agent registration:", error);
             // Broadcast error event
@@ -1573,6 +1602,114 @@ export class GameRoom implements BrothersFinder {
             this.broadcastEventToRoom(AgentEventType.AGENT_REMOVAL_ERROR, {
                 error: error instanceof Error ? error.message : "Unknown error",
             });
+        }
+    }
+
+    private updatePlayerState(user: User, group?: Group, agentInfo?: AgentInfo | undefined): void {
+        const playerState: PlayerStateInfo = {
+            id: user.id,
+            uuid: user.uuid,
+            name: user.name,
+            type: agentInfo ? "agent" : "human",
+            agentId: agentInfo?.agentId,
+            isLogged: user.isLogged,
+            visitCardUrl: user.visitCardUrl,
+            tags: user.tags,
+            group: group ? { id: group.id, members: group.members.length } : null,
+        };
+        this.playersState.set(user.id, playerState);
+        this.savePlayersStateToVariable();
+    }
+
+    private getAgentInfoForUser(user: User): AgentInfo | undefined {
+        // Find agent info by user ID
+        for (const agent of this.agents.values()) {
+            if (agent.user.id === user.id) {
+                return agent;
+            }
+        }
+        return undefined;
+    }
+
+    private async initializeMapObjectsState(): Promise<void> {
+        if (this.mapStateInitialized) {
+            return;
+        }
+        try {
+            const map = await this.getMap(true);
+            map.layers.forEach((layer) => {
+                if (layer.type === "objectgroup") {
+                    const objects = new Map<number, MapObjectState>();
+                    layer.objects.forEach((obj) => {
+                        // Tiled objects need their properties parsed from an array to a map
+                        const properties: Record<string, unknown> = {};
+                        if (obj.properties) {
+                            for (const prop of obj.properties) {
+                                properties[prop.name] = prop.value;
+                            }
+                        }
+
+                        objects.set(obj.id, {
+                            id: obj.id,
+                            name: obj.name ?? "",
+                            type: obj.type ?? "",
+                            x: obj.x,
+                            y: obj.y,
+                            width: obj.width ?? 0,
+                            height: obj.height ?? 0,
+                            properties: properties,
+                        });
+                    });
+
+                    const layerState: MapLayerState = {
+                        name: layer.name,
+                        objects,
+                    };
+                    this.mapObjectsState.layers.set(layer.name, layerState);
+                }
+            });
+            this.mapStateInitialized = true;
+            this.saveMapObjectsStateToVariable();
+        } catch (e) {
+            // Let's not crash the server if map loading fails, but log it.
+            Sentry.captureException(e);
+            console.error("Error initializing map objects state", e);
+        }
+    }
+
+    private async saveMapObjectsStateToVariable(): Promise<void> {
+        try {
+            // JSON.stringify doesn't handle Maps, so we need to convert them to arrays of [key, value] pairs.
+            const serializableLayers = [];
+            for (const [layerName, layerState] of this.mapObjectsState.layers.entries()) {
+                serializableLayers.push([
+                    layerName,
+                    {
+                        name: layerState.name,
+                        objects: Array.from(layerState.objects.entries()),
+                    },
+                ]);
+            }
+            const serializableState = {
+                layers: serializableLayers,
+            };
+
+            const mapObjectsStateJson = JSON.stringify(serializableState);
+            await this.setVariable("map_objects_state", mapObjectsStateJson, "RoomApi");
+        } catch (e) {
+            Sentry.captureException(e);
+            console.error("Error saving map objects state to variable", e);
+        }
+    }
+
+    private async savePlayersStateToVariable(): Promise<void> {
+        try {
+            const playersStateArray = Array.from(this.playersState.entries());
+            const playersStateJson = JSON.stringify(playersStateArray);
+            await this.setVariable("players_state", playersStateJson, "RoomApi");
+        } catch (e) {
+            Sentry.captureException(e);
+            console.error("Error saving players state to variable", e);
         }
     }
 }

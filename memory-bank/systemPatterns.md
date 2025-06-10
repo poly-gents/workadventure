@@ -158,4 +158,46 @@ These events are broadcast to all clients in the room, including any system list
     -   **Payload**: `{ agentId: string, playerId: number, position: { x: number, y: number } }`.
 -   **`agent-registration-error` / `agent-movement-error` / `agent-removal-error`**:
     -   **Purpose**: Announce that an agent-related operation failed.
-    -   **Payload**: `{ error: string }`. 
+    -   **Payload**: `{ error: string }`.
+
+## 5. Centralized Room State Pattern
+
+To provide a single source of truth for the state of a room, a centralized state management pattern has been implemented directly within the `GameRoom` class. This pattern ensures that all information about players and map objects is consistently tracked and can be exposed to external systems.
+
+**Core Idea**: The `GameRoom` instance maintains dedicated state objects (`playersState` and `mapObjectsState`). These objects are updated during key lifecycle events (player join/leave) or initialization (map load). The state is then serialized and saved as a WorkAdventure "room variable", making it accessible to any client with Room API access.
+
+```
++----------------+      +------------------+      +----------------------+
+| Player Actions |----->|   GameRoom.ts    |----->|   State Management   |
+| (join/leave)   |      | (handles events) |      | (playersState map)   |
++----------------+      +------------------+      +----------------------+
+                                  |                         |
+                                  |                         | (on update)
+                                  V                         V
+                          +------------------+      +----------------------+
+                          |   WA Variables   |<-----|  Save State Function |
+                          | (`players_state`)|      |  (serialize & save)  |
+                          +------------------+      +----------------------+
+                                  ^
+                                  |
+                                  | (Room API Read)
+                          +------------------+
+                          | External System  |
+                          | (e.g., dashboard)|
+                          +------------------+
+```
+
+### Key Components:
+- **State Interfaces (`State.ts`)**: Defines the data structures for the state (e.g., `PlayerStateInfo`, `MapState`). This provides a clear schema and type safety.
+- **State Properties in `GameRoom`**:
+    - `playersState: Map<number, PlayerStateInfo>`: Holds the state for every player (human and agent) in the room, keyed by their ID.
+    - `mapObjectsState: MapState`: Holds the state of all object layers from the Tiled map.
+- **Lifecycle Hooks**:
+    - **Player State**: The `playersState` map is updated within the `join()` and `leave()` methods of `GameRoom`.
+    - **Map State**: The `mapObjectsState` is populated once by the `initializeMapObjectsState()` method when the `GameRoom` is created.
+- **Room Variable Persistence**:
+    - Helper methods (`savePlayersStateToVariable`, `saveMapObjectsStateToVariable`) are called after any state change.
+    - These methods serialize the state maps into JSON and use the `setVariable` function to save them as room variables.
+    - **Variable Names**:
+        - `"players_state"`
+        - `"map_objects_state"`
