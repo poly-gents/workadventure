@@ -1,3 +1,5 @@
+import { User } from "./User";
+
 /**
  * Agent-related types and utilities for WorkAdventure
  */
@@ -21,6 +23,7 @@ export interface AgentInfo {
     id: number;
     agentId: string;
     name: string;
+    user: User;
     isFirstTime: boolean;
 }
 

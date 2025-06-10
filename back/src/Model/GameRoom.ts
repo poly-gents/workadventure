@@ -1,9 +1,11 @@
-import path from "path";
 import * as Sentry from "@sentry/node";
 import { GameMapProperties, WAMFileFormat } from "@workadventure/map-editor";
 import { LocalUrlError } from "@workadventure/map-editor/src/LocalUrlError";
 import { mapFetcher } from "@workadventure/map-editor/src/MapFetcher";
 import {
+    AvailabilityStatus,
+    CharacterTextureMessage,
+    CompanionTextureMessage,
     EditMapCommandMessage,
     EmoteEventMessage,
     isMapDetailsData,
@@ -17,12 +19,10 @@ import {
     SetPlayerDetailsMessage,
     SubToPusherRoomMessage,
     VariableWithTagMessage,
-    CharacterTextureMessage,
-    CompanionTextureMessage,
-    AvailabilityStatus,
 } from "@workadventure/messages";
 import { Jitsi } from "@workadventure/shared-utils";
 import { ITiledMap, ITiledMapProperty, Json } from "@workadventure/tiled-map-type-guard";
+import path from "path";
 import {
     ADMIN_API_URL,
     BBB_SECRET,
@@ -57,46 +57,22 @@ import { emitError, emitErrorOnRoomSocket } from "../Services/MessageHelpers";
 import { ModeratorTagFinder } from "../Services/ModeratorTagFinder";
 import { VariableError } from "../Services/VariableError";
 import { VariablesManager } from "../Services/VariablesManager";
+import {
+    AgentEventData,
+    AgentEventType,
+    AgentInfo,
+    AgentRegistrationPayload,
+    generateAgentId,
+    validateAgentRegistrationPayload
+} from "./Agent";
 import { BrothersFinder } from "./BrothersFinder";
 import { Group } from "./Group";
 import { PositionNotifier } from "./PositionNotifier";
 import { User, UserSocket } from "./User";
 import { PointInterface } from "./Websocket/PointInterface";
-import {
-    AgentRegistrationPayload as ImportedAgentRegistrationPayload,
-    AgentInfo as ImportedAgentInfo,
-    validateAgentRegistrationPayload,
-    validateAgentMovementPayload,
-    validateAgentRemovalPayload,
-    generateAgentId,
-} from "./Agent";
 
 export type ConnectCallback = (user: User, group: Group) => void;
 export type DisconnectCallback = (user: User, group: Group) => void;
-
-// Agent registration interfaces
-interface AgentRegistrationPayload {
-    agentId?: string;
-    name: string;
-    avatar?: {
-        textures: string[];
-        companion?: string;
-    };
-    position?: {
-        x: number;
-        y: number;
-    };
-    tags?: string[];
-    variables?: Record<string, unknown>;
-}
-
-interface AgentInfo {
-    id: number;
-    agentId: string;
-    name: string;
-    user: User;
-    isFirstTime: boolean;
-}
 
 export class GameRoom implements BrothersFinder {
     public readonly id: string;
@@ -1288,83 +1264,72 @@ export class GameRoom implements BrothersFinder {
     }
 
     /**
+     * Broadcasts an event to all room listeners (in-game clients and Room API listeners).
+     *
+     * @param name The name of the event to send.
+     * @param data The data payload for the event. This must be a JSON-serializable object.
+     */
+    private broadcastEventToRoom(name: string, data: unknown): void {
+        // Dispatch to in-game clients (via SubToPusherRoomMessage)
+        this.sendSubMessageToRoom({
+            message: {
+                $case: "receivedEventMessage",
+                receivedEventMessage: {
+                    name,
+                    data,
+                    senderId: undefined, // Events from agents are from the "system"
+                },
+            },
+        });
+
+        // Dispatch to Room API listeners
+        const listeners = this.eventListeners.get(name);
+        for (const eventListener of listeners ?? []) {
+            eventListener.write({
+                senderId: undefined,
+                data,
+            });
+        }
+    }
+
+    /**
      * Handles agent registration from Room API
      */
     private async handleAgentRegistration(data: unknown): Promise<void> {
         try {
-            console.log("handleAgentRegistration received data:", data);
-            console.log("Data type:", typeof data);
-            console.log("Data stringified:", JSON.stringify(data));
-            const payload = this.validateAgentRegistrationPayload(data);
+            const payload = validateAgentRegistrationPayload(data);
             const agentInfo = await this.registerAgent(payload);
-            
+
+            const variables = await this.getVariablesForTags(agentInfo.user.tags);
+            const variablesRecord: Record<string, unknown> = {};
+            variables.forEach((value, key) => {
+                try {
+                    variablesRecord[key] = JSON.parse(value);
+                } catch (e) {
+                    // Do nothing
+                }
+            });
+
             // Broadcast appropriate event based on whether this is first-time registration or login
-            const eventName = agentInfo.isFirstTime ? "new-agent" : "agent-login";
-            const eventData = {
+            const eventName = agentInfo.isFirstTime ? AgentEventType.NEW_AGENT : AgentEventType.AGENT_LOGIN;
+            const eventData: AgentEventData = {
                 playerId: agentInfo.id,
                 agentId: agentInfo.agentId,
                 name: agentInfo.name,
                 position: agentInfo.user.getPosition(),
                 uuid: agentInfo.user.uuid,
                 availabilityStatus: agentInfo.user.getAvailabilityStatus(),
-                variables: {},
+                variables: variablesRecord,
             };
 
-            this.sendSubMessageToRoom({
-                message: {
-                    $case: "receivedEventMessage",
-                    receivedEventMessage: {
-                        name: eventName,
-                        data: eventData,
-                        senderId: undefined,
-                    },
-                },
-            });
-
+            this.broadcastEventToRoom(eventName, eventData);
         } catch (error) {
             console.error("Error handling agent registration:", error);
             // Broadcast error event
-            this.sendSubMessageToRoom({
-                message: {
-                    $case: "receivedEventMessage",
-                    receivedEventMessage: {
-                        name: "agent-registration-error",
-                        data: { error: error instanceof Error ? error.message : "Unknown error" },
-                        senderId: undefined,
-                    },
-                },
+            this.broadcastEventToRoom(AgentEventType.AGENT_REGISTRATION_ERROR, {
+                error: error instanceof Error ? error.message : "Unknown error",
             });
         }
-    }
-
-    /**
-     * Validates the agent registration payload
-     */
-    private validateAgentRegistrationPayload(data: unknown): AgentRegistrationPayload {
-        if (!data || typeof data !== "object") {
-            throw new Error("Invalid payload: must be an object");
-        }
-
-        const payload = data as Record<string, unknown>;
-
-        if (!payload.name || typeof payload.name !== "string") {
-            throw new Error("Invalid payload: name is required and must be a string");
-        }
-
-        // Validate optional fields
-        if (payload.agentId && typeof payload.agentId !== "string") {
-            throw new Error("Invalid payload: agentId must be a string");
-        }
-
-        if (payload.position && (typeof payload.position !== "object" || !payload.position)) {
-            throw new Error("Invalid payload: position must be an object");
-        }
-
-        if (payload.tags && !Array.isArray(payload.tags)) {
-            throw new Error("Invalid payload: tags must be an array");
-        }
-
-        return payload as unknown as AgentRegistrationPayload;
     }
 
     /**
@@ -1376,7 +1341,7 @@ export class GameRoom implements BrothersFinder {
 
         // If no agentId provided, this is a new agent
         if (!agentId) {
-            agentId = this.generateAgentId();
+            agentId = generateAgentId();
             isFirstTime = true;
         }
 
@@ -1452,7 +1417,8 @@ export class GameRoom implements BrothersFinder {
         if (payload.variables) {
             for (const [key, value] of Object.entries(payload.variables)) {
                 try {
-                    await this.setVariable(key, JSON.stringify(value), agentUser);
+                    // Set variables as RoomApi to ensure permissions
+                    await this.setVariable(key, JSON.stringify(value), "RoomApi");
                 } catch (error) {
                     console.warn(`Failed to set variable ${key} for agent ${agentId}:`, error);
                 }
@@ -1482,13 +1448,6 @@ export class GameRoom implements BrothersFinder {
         this.positionNotifier.enter(agentUser);
 
         return agentInfo;
-    }
-
-    /**
-     * Generates a unique agent ID
-     */
-    private generateAgentId(): string {
-        return `agent_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     }
 
     /**
@@ -1534,19 +1493,10 @@ export class GameRoom implements BrothersFinder {
         this.agents.delete(agentId);
 
         // Broadcast agent departure
-        this.sendSubMessageToRoom({
-            message: {
-                $case: "receivedEventMessage",
-                receivedEventMessage: {
-                    name: "agent-logout",
-                    data: {
-                        agentId,
-                        playerId: agentInfo.id,
-                        name: agentInfo.name,
-                    },
-                    senderId: undefined,
-                },
-            },
+        this.broadcastEventToRoom(AgentEventType.AGENT_LOGOUT, {
+            agentId,
+            playerId: agentInfo.id,
+            name: agentInfo.name,
         });
 
         return true;
@@ -1583,32 +1533,16 @@ export class GameRoom implements BrothersFinder {
             this.updatePosition(agentInfo.user, { x, y, direction: "down", moving: false });
 
             // Broadcast movement event
-            this.sendSubMessageToRoom({
-                message: {
-                    $case: "receivedEventMessage",
-                    receivedEventMessage: {
-                        name: "agent-moved",
-                        data: {
-                            agentId,
-                            playerId: agentInfo.id,
-                            position: { x, y },
-                        },
-                        senderId: undefined,
-                    },
-                },
+            this.broadcastEventToRoom(AgentEventType.AGENT_MOVED, {
+                agentId,
+                playerId: agentInfo.id,
+                position: { x, y },
             });
 
         } catch (error) {
             console.error("Error handling agent movement:", error);
-            this.sendSubMessageToRoom({
-                message: {
-                    $case: "receivedEventMessage",
-                    receivedEventMessage: {
-                        name: "agent-movement-error",
-                        data: { error: error instanceof Error ? error.message : "Unknown error" },
-                        senderId: undefined,
-                    },
-                },
+            this.broadcastEventToRoom(AgentEventType.AGENT_MOVEMENT_ERROR, {
+                error: error instanceof Error ? error.message : "Unknown error",
             });
         }
     }
@@ -1636,15 +1570,8 @@ export class GameRoom implements BrothersFinder {
 
         } catch (error) {
             console.error("Error handling agent removal:", error);
-            this.sendSubMessageToRoom({
-                message: {
-                    $case: "receivedEventMessage",
-                    receivedEventMessage: {
-                        name: "agent-removal-error",
-                        data: { error: error instanceof Error ? error.message : "Unknown error" },
-                        senderId: undefined,
-                    },
-                },
+            this.broadcastEventToRoom(AgentEventType.AGENT_REMOVAL_ERROR, {
+                error: error instanceof Error ? error.message : "Unknown error",
             });
         }
     }

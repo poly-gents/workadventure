@@ -40,8 +40,9 @@
     1.  **Agent State**: `GameRoom` now maintains an `agents` map (`Map<string, AgentInfo>`) to track all registered agents and their associated `User` object.
     2.  **Event Dispatching**: The `dispatchEvent` method has been extended to act as a router for agent-specific events (`register-agent`, `move-agent`, `remove-agent`).
     3.  **Agent as User**: The core implementation detail is that an "agent" is a standard WorkAdventure `User` with a mock socket connection. This allows agents to integrate seamlessly into the existing multiplayer infrastructure (position updates, visibility, etc.).
-    4.  **Payload Validation**: Includes methods to validate the structure of incoming agent registration payloads, ensuring robustness.
-    5.  **ID Generation**: Implemented `generateAgentId` for creating unique agent identifiers when one is not provided.
+    4.  **Event Broadcasting**: A centralized `broadcastEventToRoom` method has been implemented to ensure that agent-related events (`new-agent`, `agent-logout`, etc.) are correctly sent to **both** in-game clients and external `room-api` listeners. This fixed a critical bug where API listeners were not receiving events.
+    5.  **Payload Validation**: Includes methods to validate the structure of incoming agent registration payloads, ensuring robustness.
+    6.  **ID Generation**: Implemented `generateAgentId` for creating unique agent identifiers when one is not provided.
 - **Associated Files**:
     - `back/src/Model/Agent.ts`: Defines the TypeScript interfaces (`AgentRegistrationPayload`, `AgentInfo`, etc.) and validation functions used in `GameRoom.ts`.
 
