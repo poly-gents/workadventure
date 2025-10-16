@@ -26,7 +26,7 @@ export function generateConfig(tsconfigRootDir) {
         importPlugin.flatConfigs.recommended,
         importPlugin.flatConfigs.typescript,
         rxjs.configs.recommended,
-        ...svelte.configs.recommended,
+        svelte.configs['flat/recommended'],
         {
             languageOptions: {
                 parserOptions: {
