@@ -1,5 +1,29 @@
 {
     "version": "2.0.0",
+    "osx": {
+        "options": {
+            "shell": {
+                "executable": "/bin/zsh",
+                "args": ["-c"]
+            }
+        }
+    },
+    "linux": {
+        "options": {
+            "shell": {
+                "executable": "/bin/bash",
+                "args": ["-c"]
+            }
+        }
+    },
+    "windows": {
+        "options": {
+            "shell": {
+                "executable": "C:\\Program Files\\Git\\bin\\bash.exe",
+                "args": ["-lc"]
+            }
+        }
+    },
     "tasks": [
         {
             "label": "Install workadventure",
@@ -9,9 +33,7 @@
                 "cwd": "${workspaceFolder}",
                 "shell": {
                     "executable": "/bin/zsh",
-                    "args": [
-                        "-c"
-                    ]
+                    "args": ["-c"]
                 }
             },
             "problemMatcher": [],
@@ -26,4 +48,3 @@
         }
     ]
 }
-
