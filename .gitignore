@@ -25,3 +25,7 @@ synapse/homeserver.yaml
 synapse/media_store/*
 
 .vscode/settings.json
+.workadventure/pnpm-store/*
+./memory-bank/*
+.pnpm-store/*
+.pnpm-store/v10/files/*/*

@@ -4,6 +4,15 @@
 
 # WorkAdventure
 
+This is a development environment for WorkAdventure, a web-based collaborative space.
+
+## Getting Started
+
+To get started with the development environment, please refer to the following guide for instructions on how to set up and run the project on your local machine:
+
+- [Apple Silicon (ARM64) Setup Guide](./APPLE_SILICON_SETUP.md)
+
+This guide provides detailed instructions for setting up the environment on Apple Silicon Macs, which requires special handling due to Docker and dependency incompatibilities.
 
 WorkAdventure is a platform that allows you to design **fully customizable collaborative virtual worlds** (metaverse). 
 

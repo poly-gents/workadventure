@@ -41,6 +41,7 @@ services:
       - .:/usr/src/app
     tmpfs: /tmp
     ports:
+      - "50051:50051"
       - "9231:9229"
       - "9235:9235"
     environment:
@@ -52,7 +53,7 @@ services:
       # Uncomment to run the production build in dev
       #STARTUP_COMMAND_4: npm run build
       #STARTUP_COMMAND_5: npm run build-iframe-api
-      #NODE_OPTIONS: --max-old-space-size=16384
+      NODE_OPTIONS: --max-old-space-size=8192
       DEBUG: "socket,space"
       DEBUG_COLORS: "true"
       DEBUG_ERROR_MESSAGES: "true"
@@ -175,6 +176,9 @@ services:
       - "traefik.http.routers.play.priority=1"
       - "traefik.http.routers.play.service=play"
       - "traefik.http.services.play.loadbalancer.server.port=3000"
+      - "traefik.http.middlewares.play-iframe-headers.headers.customresponseheaders.X-Frame-Options=ALLOW-FROM http://localhost:4200"
+      - "traefik.http.middlewares.play-iframe-headers.headers.customresponseheaders.Content-Security-Policy=frame-ancestors 'self' http://localhost:4200"
+      - "traefik.http.routers.play.middlewares=play-iframe-headers@docker"
 
       - "traefik.http.routers.play-ws.rule=HostRegexp(`{domain:.*}`) && PathPrefix(`/ws/`)"
       - "traefik.http.routers.play-ws.priority=2"
@@ -246,6 +250,7 @@ services:
     tmpfs: /tmp
     ports:
       - "9232:9229"
+      - "50052:50051"
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.back.rule=Host(`api.workadventure.localhost`)"
@@ -264,8 +269,8 @@ services:
       NODE_ENV: development
       PROMETHEUS_AUTHORIZATION_TOKEN: "$PROMETHEUS_AUTHORIZATION_TOKEN"
       ENABLE_BASIC_AUTHENTICATION: "true"
-      AUTHENTICATION_USER: "john.doe"
-      AUTHENTICATION_PASSWORD: "password"
+      AUTHENTICATION_USER: "admin"
+      AUTHENTICATION_PASSWORD: "polygentsadminpassword"
       API_URL: back:50051
       # Sentry integration
       SENTRY_DSN: $SENTRY_DSN_MAPSTORAGE
@@ -479,7 +484,6 @@ services:
       MATRIX_ADMIN_USER: admin
       MATRIX_ADMIN_PASSWORD: MySecretPassword
       JWT_SECRET: "$SECRET_KEY"
-
 #  coturn:
 #    image: coturn/coturn:4.5.2
 #    command:
@@ -506,4 +510,3 @@ services:
 #    network_mode: host
 #volumes:
 #  synapsedata:
-

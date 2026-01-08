@@ -1,0 +1,50 @@
+{
+    "version": "2.0.0",
+    "osx": {
+        "options": {
+            "shell": {
+                "executable": "/bin/zsh",
+                "args": ["-c"]
+            }
+        }
+    },
+    "linux": {
+        "options": {
+            "shell": {
+                "executable": "/bin/bash",
+                "args": ["-c"]
+            }
+        }
+    },
+    "windows": {
+        "options": {
+            "shell": {
+                "executable": "C:\\Program Files\\Git\\bin\\bash.exe",
+                "args": ["-lc"]
+            }
+        }
+    },
+    "tasks": [
+        {
+            "label": "Install workadventure",
+            "type": "shell",
+            "command": "if [ ! -f .env ]; then cp .env.template .env; fi && echo '🧹 Cleaning node_modules...' && find . -name 'node_modules' -type d -prune -exec rm -rf {} + 2>/dev/null || true && echo '📦 Installing with workspace awareness...' && npm install --legacy-peer-deps",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "shell": {
+                    "executable": "/bin/zsh",
+                    "args": ["-c"]
+                }
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared",
+                "showReuseMessage": false,
+                "clear": false
+            }
+        }
+    ]
+}

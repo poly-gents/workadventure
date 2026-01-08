@@ -1,16 +1,16 @@
-import { PositionInterface } from "../Model/PositionInterface";
-import { Movable } from "../Model/Movable";
-import { PositionNotifier } from "../Model/PositionNotifier";
 import { MAX_PER_GROUP } from "../Enum/EnvironmentVariable";
+import { Movable } from "../Model/Movable";
+import { PositionInterface } from "../Model/PositionInterface";
+import { PositionNotifier } from "../Model/PositionNotifier";
 import type { Zone } from "../Model/Zone";
-import { User } from "./User";
-import { ConnectCallback, DisconnectCallback, GameRoom } from "./GameRoom";
 import { CustomJsonReplacerInterface } from "./CustomJsonReplacerInterface";
+import { ConnectCallback, DisconnectCallback, GameRoom } from "./GameRoom";
+import { User } from "./User";
 
 export class Group implements Movable, CustomJsonReplacerInterface {
     private static nextId = 1;
 
-    private id: number;
+    private _id: number;
     private users: Set<User>;
     private x: number;
     private y: number;
@@ -37,11 +37,11 @@ export class Group implements Movable, CustomJsonReplacerInterface {
     ) {
         this.roomId = roomId;
         this.users = new Set<User>();
-        this.id = Group.nextId;
+        this._id = Group.nextId;
         Group.nextId++;
 
         // TODO: SECURE SPACES WITH JWT tokens.
-        this._spaceName = `${this.roomId}#${this.id}#${new Date().getTime()}`;
+        this._spaceName = `${this.roomId}#${this._id}#${new Date().getTime()}`;
 
         users.forEach((user: User) => {
             this.join(user);
@@ -54,12 +54,12 @@ export class Group implements Movable, CustomJsonReplacerInterface {
         this.currentZone = this.positionNotifier.enter(this);
     }
 
-    getUsers(): User[] {
-        return Array.from(this.users.values());
+    public get id(): number {
+        return this._id;
     }
 
-    getId(): number {
-        return this.id;
+    public get members(): User[] {
+        return Array.from(this.users.values());
     }
 
     /**
